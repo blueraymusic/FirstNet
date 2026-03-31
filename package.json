@@ -1,0 +1,12 @@
+{
+  "name": "firstnet-local",
+  "version": "1.0.0",
+  "description": "Local server for FirstNet demo with CSV account storage.",
+  "main": "server.js",
+  "scripts": {
+    "start": "lsof -i :3001 -t 2>/dev/null | xargs -r kill -9; PORT=3001 node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

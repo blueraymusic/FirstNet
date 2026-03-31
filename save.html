@@ -5,552 +5,63 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
 <title>FirstNet</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<script src="https://cdn.auth0.com/js/auth0-spa-js/2.1/auth0-spa-js.production.js"></script>
 <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
 <script>
-async function fetchAccountByPhone(phone) {
-  if (!phone) return null;
+// Auth0 config — loaded before body so client is ready on click
+let auth0Client = null;
+let auth0Ready = false;
+
+async function initAuth0() {
   try {
-    const resp = await fetch('/api/accounts?phone=' + encodeURIComponent(phone.trim()));
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return Array.isArray(data) && data.length ? data[0] : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseAccount(acc) {
-  if (!acc) return { skills: [], resources: [] };
-  const skills = (acc.skills || '').split('|').map(s => s.trim()).filter(Boolean);
-  const resources = (acc.resources || '').split('|').map(s => s.trim()).filter(Boolean);
-  return { ...acc, skills, resources };
-}
-
-function applyAccount(acc) {
-  if (!acc) return;
-  const account = parseAccount(acc);
-  A.name = account.name || '';
-  A.phone = account.phone || '';
-  A.loc = account.loc || 'Rolla, MO';
-  A.init = account.init || (()=>{ const p=(A.name||'').trim().split(/\s+/); return p.length>=2?(p[0][0]+p[p.length-1][0]).toUpperCase(): (A.name||'').slice(0,2).toUpperCase(); })();
-  A.color = account.color || '#D42B20';
-  A.skills = account.skills || [];
-  A.resources = account.resources || [];
-  _applyProfile([...A.skills, ...A.resources]);
-  const badge = document.getElementById('auth0-verified-badge');
-  if (badge) badge.style.display = 'inline-flex';
-}
-
-async function fetchAllAccounts() {
-  try {
-    const resp = await fetch('/api/accounts');
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
-}
-
-async function updateConnectedInfo(currentPhone) {
-  const infoIds = ['connected-info', 'signup-connected-info'];
-  const accounts = await fetchAllAccounts();
-  const others = accounts.filter(a => a.phone && a.phone !== (currentPhone || '').trim());
-  const txt = others.length === 0
-    ? 'No other users yet; be the first responder in your area!'
-    : `${others.length} helper${others.length > 1 ? 's' : ''} already connected.`;
-  infoIds.forEach(id => {
-    const info = document.getElementById(id);
-    if (info) info.textContent = txt;
-  });
-}
-
-const SESSION_KEY = 'firstnet_current_phone';
-
-function saveSession(phone) {
-  if (phone) localStorage.setItem(SESSION_KEY, phone);
-}
-
-function clearSession() {
-  localStorage.removeItem(SESSION_KEY);
-  stopRequesterLocationTracking();
-}
-
-async function restoreSession() {
-  const phone = localStorage.getItem(SESSION_KEY);
-  if (!phone) return false;
-  const account = await fetchAccountByPhone(phone);
-  if (!account) {
-    clearSession();
-    return false;
-  }
-  if (!account.approved || String(account.approved).toLowerCase() !== 'true') {
-    clearSession();
-    go('s-pending');
-    document.getElementById('pending-phone').textContent = phone;
-    return false;
-  }
-  A.isDemo = false;
-  stopBotSosLoop();
-  applyAccount(account);
-  go('s-home');
-  buildNearbyList();
-  setTimeout(initMap, 50);
-  startRequesterLocationTracking();
-  startPendingSOSWatch();
-  toast('Welcome back, '+ (A.name.split(' ')[0] || 'Friend') +'!');
-  return true;
-}
-
-async function login() {
-  const phone = (document.getElementById('login-phone')?.value || '').trim();
-  if (!phone) {
-    toast('Enter your phone number to log in');
-    return;
-  }
-  const account = await fetchAccountByPhone(phone);
-  if (!account) {
-    toast('No account found. Please create one.');
-    return;
-  }
-  if (!account.approved || String(account.approved).toLowerCase() !== 'true') {
-    toast('Account pending approval. We will notify you once approved.');
-    go('s-pending');
-    document.getElementById('pending-phone').textContent = phone;
-    return;
-  }
-
-  A.isDemo = false;
-  stopBotSosLoop();
-  applyAccount(account);
-  saveSession(phone);
-  toast('Welcome back, '+ (A.name.split(' ')[0] || 'Friend') +'!');
-  await updateConnectedInfo(phone);
-  go('s-home');
-  buildNearbyList();
-  setTimeout(initMap, 50);
-  startRequesterLocationTracking();
-  startPendingSOSWatch();
-}
-
-async function checkPendingStatus() {
-  const phone = document.getElementById('pending-phone').textContent.trim();
-  if (!phone) return;
-  const account = await fetchAccountByPhone(phone);
-  if (!account) {
-    toast('No account found, please register.');
-    go('s-c1');
-    return;
-  }
-  if (account.approved && String(account.approved).toLowerCase() === 'true') {
-    toast('Account approved! Logging you in now.');
-    login();
-    return;
-  }
-  toast('Still pending approval. Please check again soon.');
-}
-
-const PENDING_SOS_KEY = 'firstnet_pending_sos';
-let pendingSOSWatch = null;
-window.FNET_DEBUG_LOG = window.FNET_DEBUG_LOG || [];
-
-function debugLog(entry) {
-  const t = new Date().toISOString();
-  const msg = typeof entry === 'string' ? entry : JSON.stringify(entry);
-  const rec = `[${t}] ${msg}`;
-  window.FNET_DEBUG_LOG.push(rec);
-  if (window.FNET_DEBUG_LOG.length > 500) window.FNET_DEBUG_LOG.shift();
-  console.log('[FirstNet]', rec);
-}
-
-function getPendingSOS() {
-  const item = localStorage.getItem(PENDING_SOS_KEY);
-  if (!item) return null;
-  try { return JSON.parse(item); } catch (e) { debugLog('getPendingSOS parse error '+e); return null; }
-}
-
-async function fetchPendingSOSFromServer() {
-  try {
-    const resp = await fetch('/api/sos');
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return Array.isArray(data) && data.length ? data[0] : null;
-  } catch (e) {
-    debugLog('[FirstNet] fetchPendingSOSFromServer error: ' + e);
-    return null;
-  }
-}
-
-async function syncServerSOSToLocal() {
-  const serverSOS = await fetchPendingSOSFromServer();
-  const localSOS = getPendingSOS();
-
-  if (!serverSOS) {
-    if (localSOS) {
-      debugLog('[FirstNet] syncServerSOSToLocal: clearing local pending SOS');
-      clearPendingSOS();
-    }
-    return;
-  }
-
-  let updateLocal = false;
-  if (!localSOS) updateLocal = true;
-  else if (localSOS.id !== serverSOS.id) updateLocal = true;
-  else if (JSON.stringify(localSOS) !== JSON.stringify(serverSOS)) updateLocal = true;
-
-  if (updateLocal) {
-    debugLog('[FirstNet] syncServerSOSToLocal: updating local from server SOS ' + serverSOS.id);
-    localStorage.setItem(PENDING_SOS_KEY, JSON.stringify(serverSOS));
-    localStorage.setItem('firstnet_sos_signal', JSON.stringify({ts:Date.now(), type:'server'}));
-  }
-}
-
-function setPendingSOS(sos) {
-  debugLog('setPendingSOS: ' + (sos ? JSON.stringify({status:sos.status, requester:sos.requesterPhone, matched:sos.acceptedBy?true:false}) : 'clear'));
-  if (!sos) {
-    localStorage.removeItem(PENDING_SOS_KEY);
-    localStorage.setItem('firstnet_sos_signal', JSON.stringify({ts:Date.now(), type:'clear'}));
-    return;
-  }
-  localStorage.setItem(PENDING_SOS_KEY, JSON.stringify(sos));
-  localStorage.setItem('firstnet_sos_signal', JSON.stringify({ts:Date.now(), type:'update'}));
-}
-
-async function createServerSOS(sos) {
-  try {
-    const resp = await fetch('/api/sos', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(sos)
+    auth0Client = await window.auth0.createAuth0Client({
+      domain: 'dev-giuyhhmo272cqu1u.us.auth0.com',
+      clientId: 'XY9m42bWDakHSoWbY4SiTJcugzew4hpI',
+      authorizationParams: {
+        redirect_uri: window.location.href.split('?')[0].split('#')[0].replace('.html','')
+      }
     });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data.sos || null;
-  } catch (e) {
-    debugLog('[FirstNet] createServerSOS error: ' + e);
-    return null;
+    auth0Ready = true;
+    console.log('Auth0 ready ✓');
+  } catch(e) {
+    console.warn('Auth0 init failed:', e);
+    auth0Ready = false;
   }
 }
 
-async function acceptServerSOS(id, helper) {
+async function loginWithAuth0() {
+  if (!auth0Ready || !auth0Client) {
+    toast('Auth0 still loading — try again in a moment');
+    // retry init
+    await initAuth0();
+    return;
+  }
   try {
-    const resp = await fetch(`/api/sos/${encodeURIComponent(id)}/accept`, {
-      method: 'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ helper })
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data.sos || null;
-  } catch (e) {
-    debugLog('[FirstNet] acceptServerSOS error: ' + e);
-    return null;
-  }
-}
-
-async function declineServerSOS(id, helperPhone) {
-  try {
-    const resp = await fetch(`/api/sos/${encodeURIComponent(id)}/decline`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ helperPhone })
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data.sos || null;
-  } catch (e) {
-    debugLog('[FirstNet] declineServerSOS error: ' + e);
-    return null;
-  }
-}
-
-async function timeoutServerSOS(id) {
-  try {
-    const resp = await fetch(`/api/sos/${encodeURIComponent(id)}/timeout`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'}
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data.sos || null;
-  } catch (e) {
-    debugLog('[FirstNet] timeoutServerSOS error: ' + e);
-    return null;
-  }
-}
-
-async function clearServerSOS(id) {
-  try {
-    const resp = await fetch(`/api/sos/${encodeURIComponent(id)}/clear`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'}
-    });
-    return resp.ok;
-  } catch (e) {
-    debugLog('[FirstNet] clearServerSOS error: ' + e);
-    return false;
-  }
-}
-
-function clearPendingSOS() {
-  localStorage.removeItem(PENDING_SOS_KEY);
-  localStorage.setItem('firstnet_sos_signal', JSON.stringify({ts:Date.now(), type:'clear'}));
-}
-
-function isHelperMatchingSOS(sos) {
-  if (A.isDemo) return true;
-  if (!A.skills || !A.skills.length) return false;
-
-  const sosType = sos.em || 'Other';
-  const sosKeywords = EM_BOT_SKILLS[sosType] || EM_BOT_SKILLS['Other'];
-  const helperText = [...(A.skills || []), ...(A.resources || [])].join(' ').toLowerCase();
-
-  if (sosKeywords.some(k => helperText.includes(k.toLowerCase()))) {
-    return true;
-  }
-
-  const desc = (sos.desc || '').toLowerCase();
-  if (desc && [...(A.skills || []), ...(A.resources || [])].some(s => desc.includes(s.toLowerCase()))) {
-    return true;
-  }
-
-  return false;
-}
-
-function placeHelperHelpeeLocation(sos) {
-  const el = document.getElementById('hhelpeeLoc');
-  if (!el) return;
-  if (!sos || !sos.requesterLat || !sos.requesterLng) {
-    el.textContent = 'Helpee location: not available';
-    clearSOSMarker();
-    resetHelperMap();
-    return;
-  }
-  const lat = Number(sos.requesterLat);
-  const lng = Number(sos.requesterLng);
-  if (isNaN(lat) || isNaN(lng)) {
-    el.textContent = 'Helpee location: invalid coordinates';
-    clearSOSMarker();
-    resetHelperMap();
-    return;
-  }
-
-  const dist = calcDist(lat, lng, USER_LAT, USER_LNG);
-  const baseText = `Helpee location: ${lat.toFixed(5)}, ${lng.toFixed(5)} (${dist.toFixed(2)} mi away)`;
-  el.textContent = baseText + ' · resolving address...';
-
-  window.REQUESTER_LAT = lat;
-  window.REQUESTER_LNG = lng;
-  updateLatLngOnMaps(lat, lng);
-
-  const key = lat.toFixed(5) + ',' + lng.toFixed(5);
-  lastReverseGeocodeKey = key;
-  const cached = reverseGeoCache[key];
-  if (cached) {
-    el.textContent = `${baseText} · ${cached}`;
-    return;
-  }
-
-  reverseGeocode(lat, lng).then(address => {
-    if (!address) {
-      if (lastReverseGeocodeKey === key) {
-        el.textContent = `${baseText} · address not found`;
-      }
-      return;
+    await auth0Client.loginWithPopup({});
+    const user = await auth0Client.getUser();
+    if (user) {
+      const nameEl = document.getElementById('i-name');
+      const emailEl = document.getElementById('i-email');
+      if (nameEl && user.name) nameEl.value = user.name;
+      if (emailEl && user.email) emailEl.value = user.email;
+      ck1();
+      go('s-c1');
+      toast('Welcome, ' + (user.given_name || user.name.split(' ')[0] || 'there') + '! 👋');
+      // Show verified badge on profile
+      document.getElementById('auth0-verified-badge').style.display = 'inline-flex';
     }
-    if (lastReverseGeocodeKey !== key) return;
-    el.textContent = `${baseText} · ${address}`;
-  });
-}
-
-function handlePendingSOSUpdate() {
-  debugLog('[FirstNet] checking pending SOS: user=' + A.phone + ' demo=' + A.isDemo + ' avail=' + A.avail + ' cur=' + cur);
-  const sos = getPendingSOS();
-  debugLog('[FirstNet] pending sos=' + JSON.stringify(sos));
-  placeHelperHelpeeLocation(sos);
-  if (!sos) {
-    debugLog('[FirstNet] no pending SOS');
-    resetHelperMap();
-    if (cur === 's-matched') {
-      toast('SOS resolved; returning home.', 2600);
-      go('s-home');
-    } else if (cur === 's-helper') {
-      const hidl = document.getElementById('hidl');
-      const hinc = document.getElementById('hinc');
-      const hacc = document.getElementById('hacc');
-      if ((hinc && hinc.style.display === 'block') || (hacc && hacc.style.display === 'flex')) {
-        toast('SOS cleared. Back to monitoring.', 2200);
-        if (hidl) hidl.style.display = 'flex';
-        if (hinc) hinc.style.display = 'none';
-        if (hacc) hacc.style.display = 'none';
-      }
-    }
-    return;
-  }
-
-  // Helper sync: if sos is no longer pending, reset helper alert UI
-  if (!A.isDemo && A.phone && A.phone !== sos.requesterPhone && sos.status !== 'pending') {
-    if (cur === 's-helper') {
-      const hidl = document.getElementById('hidl');
-      const hinc = document.getElementById('hinc');
-      const hacc = document.getElementById('hacc');
-
-      if (sos.status === 'accepted') {
-        if (sos.acceptedBy && sos.acceptedBy.phone === A.phone) {
-          if (hidl) hidl.style.display = 'none';
-          if (hinc) hinc.style.display = 'none';
-          if (hacc) hacc.style.display = 'flex';
-          toast('SOS accepted by you. En route.', 2500);
-        } else {
-          if (hidl) hidl.style.display = 'flex';
-          if (hinc) hinc.style.display = 'none';
-          if (hacc) hacc.style.display = 'none';
-          toast('SOS already accepted by another helper.', 2500);
-        }
-      } else if (sos.status === 'timeout') {
-        if (hidl) hidl.style.display = 'flex';
-        if (hinc) hinc.style.display = 'none';
-        if (hacc) hacc.style.display = 'none';
-        toast('SOS timed out. Waiting for next request.', 2500);
-      }
-    }
-    return;
-  }
-
-  // Requester view: if my SOS is accepted, show matched
-  if (A.phone && sos.requesterPhone === A.phone) {
-    debugLog('[FirstNet] requester check, status=' + sos.status);
-    if (sos.status === 'accepted' && sos.acceptedBy) {
-      const helper = sos.acceptedBy;
-      debugLog('[FirstNet] sos accepted by ' + helper.phone);
-      const helperBot = {
-        name: helper.name || 'Helper',
-        init: helper.init || (helper.name||'').slice(0,2).toUpperCase(),
-        color: helper.color || '#1A7A4A',
-        skills: (helper.skills || []).join(' · ') || 'Responder',
-        eta: 2
-      };
-      A._matchedBot = helperBot;
-      setPendingSOS(sos); // keep accepted state so resolve can clear server
-      A.sosId = sos.id;
-      // Only call _showMatched once — not on every poll tick
-      if (cur !== 's-matched') {
-        _showMatched(helperBot, sos.triage, sos.desc, 0, sos);
-      }
-      return;
-    }
-    if (sos.status === 'timeout') {
-      toast('No helper accepted yet; 911 escalation is disabled in dev mode.', 4400);
-      clearPendingSOS();
-      return;
+  } catch(e) {
+    console.error('Auth0 login error:', e);
+    if (e.message && e.message.includes('popup')) {
+      toast('Popup blocked — allow popups for localhost and try again');
+    } else {
+      toast('Login error: ' + (e.message || 'unknown'));
     }
   }
-
-  // Helper view: show incoming shared SOS for non-demo helpers
-  if (!A.isDemo && A.phone && A.phone !== sos.requesterPhone && sos.status === 'pending') {
-    const hasDeclined = sos.declinedBy && sos.declinedBy.includes(A.phone);
-    const matches = isHelperMatchingSOS(sos);
-    debugLog('[FirstNet] helper check: hasDeclined=' + hasDeclined + ' avail=' + A.avail + ' match=' + matches);
-
-    if (!hasDeclined && A.avail) {
-      if (!matches) {
-        debugLog('[FirstNet] helper fallback: unmatched but alerting to avoid miss');
-      }
-
-      const alreadyNotified = sos.notifiedBy && sos.notifiedBy.includes(A.phone);
-      if (!alreadyNotified && cur !== 's-helper') {
-        toast('🔔 New SOS nearby. Tap Helper to respond.', 4200);
-        go('s-helper');
-      }
-
-      showIncomingHelperSOS(sos);
-      refreshSOSChat();
-      return;
-    }
-  }
-
-  if (sos && (sos.status === 'accepted' || sos.status === 'pending')) {
-    refreshSOSChat();
-  }
 }
 
-function startPendingSOSWatch() {
-  if (pendingSOSWatch) return;
-  async function tick() {
-    await syncServerSOSToLocal();
-    handlePendingSOSUpdate();
-  }
-  tick();
-  pendingSOSWatch = setInterval(tick, 1200);
-}
-
-function stopPendingSOSWatch() {
-  if (pendingSOSWatch) {
-    clearInterval(pendingSOSWatch);
-    pendingSOSWatch = null;
-  }
-}
-
-function showIncomingHelperSOS(sos) {
-  debugLog('[FirstNet] showIncomingHelperSOS for ' + (sos.requesterPhone || 'unknown requester'));
-  const triage = sos.triage || {h:'Assess on arrival.', sev:'MEDIUM'};
-  document.getElementById('itype').textContent = sos.em || 'Emergency';
-  const dist = calcDist(USER_LAT, USER_LNG, Number(sos.requesterLat), Number(sos.requesterLng));
-  const eta = Math.max(1, Math.ceil(dist * 2));
-  document.getElementById('idist').textContent = dist.toFixed(1) + ' mi away · ~' + eta + ' min';
-  document.getElementById('iguide').textContent = triage.h;
-  const descBox = document.getElementById('iudesc');
-  if (sos.desc) { descBox.textContent = '"'+sos.desc+'"'; descBox.style.display = 'block'; }
-  else { descBox.style.display = 'none'; }
-  const pill = document.getElementById('isev');
-  pill.className = 'sev-pill ' + (triage.sev && triage.sev.toLowerCase() === 'critical' ? 'critical' : triage.sev && triage.sev.toLowerCase() === 'high' ? 'high' : 'med');
-  pill.textContent = triage.sev ? triage.sev.toUpperCase() : 'MEDIUM';
-  document.getElementById('hidl').style.display = 'none';
-  document.getElementById('hinc').style.display = 'block';
-  document.getElementById('hacc').style.display = 'none';
-  document.getElementById('hbadge').style.display = 'grid';
-  if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-  toast('🚨 Incoming SOS from ' + (sos.requesterName || 'Requester') + '!', 3000);
-  showAppNotification('SOS Alert: ' + (sos.requesterName || 'Responder nearby'), sos.desc || 'Tap to view details in FirstNet');
-
-  // Mark as notified so we don't re-alert as soon as the interval fires again.
-  sos.notifiedBy = sos.notifiedBy || [];
-  if (!sos.notifiedBy.includes(A.phone)) {
-    sos.notifiedBy.push(A.phone);
-  }
-  setPendingSOS(sos);
-}
-
-window.addEventListener('storage', (event) => {
-  if (event.key === PENDING_SOS_KEY || event.key === 'firstnet_sos_signal') {
-    console.log('[FirstNet] storage event', event.key, event.newValue);
-    debugLog('[FirstNet] storage event ' + event.key + ' value ' + event.newValue);
-    handlePendingSOSUpdate();
-  }
-});
-
-window.addEventListener('visibilitychange', () => {
-  debugLog('[FirstNet] visibilitychange: ' + document.visibilityState);
-  handlePendingSOSUpdate();
-});
-
-window.addEventListener('focus', () => {
-  debugLog('[FirstNet] window focus detected');
-  handlePendingSOSUpdate();
-});
-
-window.printFirstNetDebug = function() {
-  console.group('FirstNet debug log');
-  window.FNET_DEBUG_LOG.slice(-80).forEach((l) => console.log(l));
-  console.groupEnd();
-  return window.FNET_DEBUG_LOG;
-};
-
-window.clearFirstNetDebug = function() {
-  window.FNET_DEBUG_LOG = [];
-  console.log('[FirstNet] debug history cleared');
-};
-
+// Init immediately when script runs
+initAuth0();
 </script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
@@ -827,7 +338,6 @@ textarea.inp{resize:none;line-height:1.5}
 /* AUTH0 */
 .btn-auth0{background:#fff;color:#111;border:1.5px solid var(--border);font-weight:700;display:flex;align-items:center;justify-content:center;gap:10px;transition:all .15s}
 .btn-auth0:active{background:#f0ede6}
-.btn-auth0 .btn-text{margin-left:-10px;}
 .auth0-logo{width:22px;height:22px;flex-shrink:0}
 .auth0-badge{display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:20px;padding:5px 12px;font-size:11px;font-weight:700;color:rgba(255,255,255,.55);margin-top:12px}
 .auth0-badge svg{opacity:.6}
@@ -897,52 +407,18 @@ textarea.inp{resize:none;line-height:1.5}
   </div>
   <div class="splash-foot">
     <button class="btn btn-red" onclick="go('s-c1')">Create Account</button>
-    <button class="btn btn-auth0" onclick="go('s-login')">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/></svg><span class="btn-text">Log in</span>
+    <button class="btn btn-auth0" onclick="loginWithAuth0()">
+      <svg class="auth0-logo" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="16" cy="16" r="16" fill="#EB5424"/><path d="M16 7l3.09 9.51H28L20.46 22.1l2.95 9.08L16 25.48l-7.41 5.7 2.95-9.08L4 16.51h8.91L16 7z" fill="#fff"/></svg>
+      Continue with Auth0
     </button>
     <button class="btn btn-ghost" onclick="demo()">Skip — Demo Mode</button>
     <div style="text-align:center">
       <div class="auth0-badge">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-        Local login — direct account lookup
+        Secured by Auth0 · MFA enabled
       </div>
     </div>
   </div>
-</div>
-
-<!-- LOGIN -->
-<div class="screen" id="s-login">
-  <div class="sb" style="background:var(--white)"></div>
-  <div class="shead">
-    <div class="shead-row"><button class="back" onclick="go('s-splash')">←</button><div class="stitle">Log In</div></div>
-  </div>
-  <div class="scroll"><div style="padding:22px">
-    <p style="font-size:14px;color:var(--ink2);margin-bottom:20px;line-height:1.65">Enter your name and phone number to log in.</p>
-    <label class="il">Full Name</label>
-    <input class="inp" id="login-name" placeholder="Jane Smith" style="margin-bottom:12px"/>
-    <label class="il">Phone</label>
-    <input class="inp" id="login-phone" placeholder="(555) 000-0000" />
-    <button class="btn btn-red" onclick="login()">Log in</button>
-    <div id="connected-info" style="margin-top:14px;text-align:center;font-size:13px;color:var(--ink2);line-height:1.4">Looking for connected helpers…</div>
-    <div style="margin-top:18px;text-align:center;font-size:12px;color:var(--ink3);">
-      <span>Don't have an account?</span>
-      <button class="btn btn-ghost" style="padding:8px 10px;font-size:12px" onclick="go('s-c1')">Create one</button>
-    </div>
-  </div></div>
-</div>
-
-<!-- PENDING APPROVAL -->
-<div class="screen" id="s-pending">
-  <div class="sb" style="background:var(--white)"></div>
-  <div class="shead">
-    <div class="shead-row"><button class="back" onclick="go('s-splash')">←</button><div class="stitle">Approval Pending</div></div>
-  </div>
-  <div class="scroll"><div style="padding:22px">
-    <p style="font-size:14px;color:var(--ink2);line-height:1.6">Your account is pending approval. Once approved, you can log in and join helpers.</p>
-    <p style="font-size:13px;color:var(--ink2);margin-bottom:18px">Phone: <strong id="pending-phone"></strong></p>
-    <button class="btn btn-red" onclick="checkPendingStatus()">Check status</button>
-    <button class="btn btn-ghost" style="margin-top:14px" onclick="go('s-splash')">Back to splash</button>
-  </div></div>
 </div>
 
 <!-- STEP 1 -->
@@ -953,7 +429,6 @@ textarea.inp{resize:none;line-height:1.5}
     <div class="step-bar"><div class="pip active"></div><div class="pip"></div><div class="pip"></div></div>
   </div>
   <div class="scroll"><div style="padding:22px">
-    <div id="signup-connected-info" style="margin-bottom:14px;font-size:13px;color:var(--ink2);line-height:1.4">Checking who is nearby...</div>
     <div class="lbl" style="margin-bottom:14px">Your initials (shown on map)</div>
     <div style="display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap" id="initGrid">
       <div class="av-opt" data-init="SK" data-color="#D42B20" onclick="pickInit(this)" style="width:56px;height:56px;border-radius:14px;background:#D42B20;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:20px;display:grid;place-items:center;cursor:pointer;border:3px solid #D42B20;letter-spacing:.5px">SK</div>
@@ -1199,7 +674,7 @@ textarea.inp{resize:none;line-height:1.5}
     </div>
     <div class="eta-row">
       <div class="eta-box"><div class="eta-num g" id="etadisp">2:00</div><div class="eta-lbl">Helper ETA</div></div>
-      <div class="eta-box"><div class="eta-num d" id="ambetadisp">8:30</div><div class="eta-lbl">Ambulance ETA</div></div>
+      <div class="eta-box"><div class="eta-num d">8:30</div><div class="eta-lbl">Ambulance ETA</div></div>
     </div>
   </div>
   <div class="guidance" id="rguide">Stay calm and still. Help is on the way.</div>
@@ -1218,7 +693,7 @@ textarea.inp{resize:none;line-height:1.5}
     <input class="chat-inp" id="cinpR" placeholder="Message your helper…" onkeydown="if(event.key==='Enter')sendChat('req')"/>
     <button class="chat-send" onclick="sendChat('req')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
   </div>
-  <div class="resolve-foot"><button class="btn btn-outline" onclick="resolve()">Mark as Resolved</button></div>
+  <div class="resolve-foot"><button class="btn btn-outline" onclick="resolveAsRequester()">Mark as Resolved</button></div>
 </div>
 
 <!-- HELPER -->
@@ -1231,7 +706,6 @@ textarea.inp{resize:none;line-height:1.5}
       <div class="tlabel" id="tlabel">Available</div>
     </div>
   </div>
-  <div id="hmap" style="height:150px; margin:10px 14px; border:1px solid var(--border); border-radius:12px; overflow:hidden"></div>
   <div id="hidl" style="flex:1;display:flex;flex-direction:column">
     <div class="h-idle">
       <div class="idle-ring"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--ink3)" stroke-width="1.5" stroke-linecap="round"><path d="M12 22s-8-4.5-8-11.8A8 8 0 0 1 12 2a8 8 0 0 1 8 8.2c0 7.3-8 11.8-8 11.8z"/><circle cx="12" cy="10" r="3"/></svg></div>
@@ -1266,7 +740,6 @@ textarea.inp{resize:none;line-height:1.5}
   <div id="hacc" style="display:none;flex:1;flex-direction:column">
     <div class="enroute-banner"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="13 17 18 12 13 7"/><path d="M6 12h12"/></svg>En route — you accepted this SOS</div>
     <div class="guidance" id="hguide" style="margin:12px 14px">Assess on arrival.</div>
-    <div class="hhelpee-loc" id="hhelpeeLoc" style="margin:6px 14px 4px; font-size:13px; color:var(--ink3); outline: 1px dashed var(--border); padding:6px; border-radius:8px">Helpee location is loading…</div>
     <div class="chat-area" style="padding:0 14px 0">
       <div class="lbl" style="margin-bottom:10px;flex-shrink:0">Chat with Requester</div>
       <div class="chat-scroll" id="chatH" style="max-height:160px">
@@ -1296,19 +769,74 @@ textarea.inp{resize:none;line-height:1.5}
     <div class="p-chips" id="pchips"><span class="p-chip">CPR Certified</span><span class="p-chip">First Aid</span><span class="p-chip">AED</span></div>
     <div id="auth0-verified-badge" style="display:none" class="verified-badge">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-      Verified
+      Verified by Auth0
     </div>
   </div>
   <div class="scroll">
-    
+
+    <!-- SOLANA WALLET CARD -->
+    <div style="padding:14px 14px 0">
+      <div id="sol-disconnected">
+        <div style="margin-bottom:10px">
+          <label class="il">Your Solana Wallet Address</label>
+          <input class="inp" id="sol-wallet-input" placeholder="Paste your wallet address…" style="margin-bottom:8px" oninput="this.value=this.value.trim()"/>
+        </div>
+        <button class="sol-connect-btn" onclick="connectWallet()">
+          <svg width="20" height="20" viewBox="0 0 128 128" fill="none"><circle cx="64" cy="64" r="64" fill="url(#sg)"/><defs><linearGradient id="sg" x1="0" y1="0" x2="128" y2="128"><stop stop-color="#9945FF"/><stop offset="1" stop-color="#14F195"/></linearGradient></defs><path d="M34 80h52a4 4 0 0 0 3-6.5L57 38a4 4 0 0 0-6 0L25 73.5A4 4 0 0 0 28 80z" fill="#fff" opacity=".9"/></svg>
+          Connect Wallet
+        </button>
+        <p style="font-size:11px;color:var(--ink3);text-align:center;margin-top:8px">Earn 5 SOL for every emergency you help resolve</p>
+      </div>
+      <div id="sol-connected" style="display:none">
+        <div class="sol-connected-card">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div>
+              <div style="font-weight:700;font-size:13px;color:var(--ink)">Phantom Wallet</div>
+              <div class="sol-wallet-addr" id="sol-addr">...</div>
+            </div>
+            <div class="sol-pill">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+              Connected
+            </div>
+          </div>
+          <div class="sol-earnings-row">
+            <div class="sol-earn-box">
+              <div class="sol-earn-num" id="sol-earned">0.00</div>
+              <div class="sol-earn-lbl">SOL Earned</div>
+            </div>
+            <div class="sol-earn-box">
+              <div class="sol-earn-num" id="sol-responses">0</div>
+              <div class="sol-earn-lbl">Responses</div>
+            </div>
+          </div>
+          <div id="sol-last-tx" style="display:none">
+            <a class="sol-tx-badge" id="sol-tx-link" href="#" target="_blank">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              View last transaction on Solana Explorer
+            </a>
+          </div>
+          <div id="sol-ratelimit-box" style="display:none;margin-top:10px;background:rgba(180,83,9,.08);border:1.5px solid rgba(180,83,9,.25);border-radius:13px;padding:13px 14px">
+            <div style="font-size:12px;font-weight:700;color:#B45309;margin-bottom:6px">⏳ Devnet faucet rate-limited</div>
+            <div style="font-size:12px;color:var(--ink2);line-height:1.6;margin-bottom:10px">The public faucet limits requests per IP. Claim directly from the web faucet — it's instant and free.</div>
+            <a id="sol-faucet-btn" href="#" target="_blank" style="display:flex;align-items:center;justify-content:center;gap:8px;background:linear-gradient(135deg,#9945FF,#14F195);color:#fff;font-weight:700;font-size:13px;padding:11px 14px;border-radius:11px;text-decoration:none">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              Claim SOL on faucet.solana.com
+            </a>
+            <div style="font-size:11px;color:var(--ink3);margin-top:8px;text-align:center">Phantom must be set to <strong>Devnet</strong> to see balance</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="city-card" style="margin-top:10px">
       <div class="city-ch"><div class="city-cht" id="cityTitle">Rolla, MO — This Month</div><div class="city-chs">Community Dashboard</div></div>
       <div class="crow"><div class="crow-l">Total SOS handled</div><div class="crow-v g" id="stat-total">47</div></div>
       <div class="crow"><div class="crow-l">Avg community response</div><div class="crow-v g" id="stat-avg">2:06 min</div></div>
       <div class="crow"><div class="crow-l">Avg 911 response</div><div class="crow-v a">8:30 min</div></div>
       <div class="crow"><div class="crow-l">Your responses</div><div class="crow-v" id="stat-mine">23</div></div>
-  </div>
-    <div style="padding:0 14px 32px"><button class="btn btn-outline" onclick="clearSession(); go('s-splash'); resetAll()" style="margin-top:12px;color:var(--ink3);font-size:13px">Sign Out</button></div>
+      <div class="crow"><div class="crow-l">SOL earned on-chain</div><div class="crow-v" id="stat-sol" style="background:linear-gradient(135deg,#9945FF,#14F195);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-family:'Bebas Neue',sans-serif;font-size:20px">0.00</div></div>
+    </div>
+    <div style="padding:0 14px 32px"><button class="btn btn-outline" onclick="go('s-splash');resetAll()" style="margin-top:12px;color:var(--ink3);font-size:13px">Sign Out</button></div>
   </div>
   <div class="navbar">
     <button class="nb" id="nb0c" onclick="ntab('s-home',0)"><div class="nb-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg></div>Need Help</button>
@@ -1320,11 +848,11 @@ textarea.inp{resize:none;line-height:1.5}
 </div><!-- /phone -->
 
 <script>
-const GROQ_KEY = "Groq_key_1234567890abcdef"; // Placeholder key; replace with your actual Groq API key
+const GROQ_KEY = "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";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 /* ════ STATE ════ */
-const A = { name:'', loc:'', color:'#D42B20', init:'SK', em:'', detectedEmType:'', sosId:null, userId:null, etaT:null, etaS:120, avail:true, phone:'', isDemo:false };
+const A = { name:'', loc:'', color:'#D42B20', init:'SK', em:'', detectedEmType:'', sosId:null, userId:null, etaT:null, etaS:120, avail:true };
 let cur = 's-splash';
 let addingType = 'skill';
 let selInit = { init:'SK', color:'#D42B20' };
@@ -1339,65 +867,7 @@ let BOTS = [
   { id:'b6', name:'Aisha M.',  init:'AM', color:'#BE185D', skills:'First Aid · EpiPen',         lat:37.9478, lng:-91.7688, dist:'0.9 mi', eta:5 },
 ];
 
-let USER_LAT = 37.9514, USER_LNG = -91.7710;
-let REQUESTER_LAT = USER_LAT;
-let REQUESTER_LNG = USER_LNG;
-let requesterLocationWatchId = null;
-
-function startRequesterLocationTracking() {
-  if (!navigator.geolocation) {
-    console.warn('Geolocation unavailable; using fallback location');
-    return;
-  }
-  if (requesterLocationWatchId !== null) return;
-
-  requesterLocationWatchId = navigator.geolocation.watchPosition(
-    (pos) => {
-      const { latitude, longitude } = pos.coords;
-      USER_LAT = latitude;
-      USER_LNG = longitude;
-      REQUESTER_LAT = latitude;
-      REQUESTER_LNG = longitude;
-      window.REQUESTER_LAT = latitude;
-      window.REQUESTER_LNG = longitude;
-
-      if (userMarker) userMarker.setLatLng([latitude, longitude]);
-      if (userMarkerM) userMarkerM.setLatLng([latitude, longitude]);
-      if (routeLineM && helperLat != null && helperLng != null) {
-        routeLineM.setLatLngs([[helperLat, helperLng], [latitude, longitude]]);
-      }
-
-      const sos = getPendingSOS();
-      if (sos && sos.id && (sos.status === 'pending' || sos.status === 'accepted')) {
-        updateServerRequesterLocation(sos.id, latitude, longitude);
-      }
-    },
-    (err) => {
-      console.warn('Geolocation watch failed; using fallback location', err);
-    },
-    { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
-  );
-}
-
-function stopRequesterLocationTracking() {
-  if (requesterLocationWatchId !== null) {
-    navigator.geolocation.clearWatch(requesterLocationWatchId);
-    requesterLocationWatchId = null;
-  }
-}
-
-async function updateServerRequesterLocation(id, lat, lng) {
-  if (!id) return;
-  try {
-    await fetch(`/api/sos/${encodeURIComponent(id)}/update-requester-location`, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ requesterLat: lat, requesterLng: lng })
-    });
-  } catch (e) {
-    debugLog('[FirstNet] updateServerRequesterLocation error: ' + e);
-  }
-}
+const USER_LAT = 37.9514, USER_LNG = -91.7710;
 
 const TRIAGE = {
   'Cardiac / Chest Pain':  { sev:'critical', r:'Stop moving. Chew aspirin if available. Call 911 and stay on the line.', h:'Bring AED. Be ready to start CPR immediately on arrival.' },
@@ -1416,7 +886,6 @@ async function groqChat(messages, maxTokens=300) {
     headers:{ 'Authorization':'Bearer '+GROQ_KEY, 'Content-Type':'application/json' },
     body: JSON.stringify({ model:GROQ_MODEL, max_tokens:maxTokens, temperature:0.3, messages })
   });
-  if (!resp.ok) throw new Error('Groq ' + resp.status);
   const d = await resp.json();
   return d.choices[0].message.content.trim();
 }
@@ -1444,11 +913,11 @@ Respond ONLY with valid JSON (no markdown, no extra text):
 async function groqBotReply(emType, desc, botName, role, conversationHistory, userMsg) {
   let systemPrompt;
   if (role === 'hlp') {
-    // Helper is sending a message — respond as the calm trained responder
-    systemPrompt = `You are ${botName}, a trained community first responder en route to a "${emType}" emergency. Situation: "${desc}". Reply as a calm, professional helper — brief, reassuring, practical. 1-2 sentences. No emojis.`;
-  } else {
-    // Requester is sending a message — respond as the scared person in need
+    // You are the HELPER chatting with the person in need
     systemPrompt = `You are a person named ${botName || 'Alex'} who needs emergency help. The emergency is: "${emType}". Your situation: "${desc}". You are texting a community responder who is on their way. Reply as a scared/stressed person who needs help — brief, 1-2 sentences, realistic. Be specific to your situation. No emojis.`;
+  } else {
+    // You are the BOT HELPER responding to the requester
+    systemPrompt = `You are ${botName}, a trained community first responder en route to a "${emType}" emergency. Situation: "${desc}". Reply as a calm, professional helper — brief, reassuring, practical. 1-2 sentences. No emojis.`;
   }
   const messages = [
     {role:'system', content: systemPrompt},
@@ -1512,22 +981,12 @@ function go(id) {
   document.getElementById(cur).classList.remove('active');
   document.getElementById(id).classList.add('active');
   cur = id;
-
-  if (id === 's-login') {
-    updateConnectedInfo(document.getElementById('login-phone')?.value?.trim() || '');
-  }
-  if (id === 's-c1') {
-    updateConnectedInfo('');
-  }
 }
 function ntab(id, idx) {
   [['nb0','nb0b','nb0c'],['nb1','nb1b','nb1c'],['nb2','nb2b','nb2c']].forEach((grp,i)=>{
     grp.forEach(nb=>{ const el=document.getElementById(nb); if(el) el.className='nb'+(i===idx?' active':''); });
   });
-  if(id === 's-helper') {
-    document.getElementById('hbadge').style.display='none';
-    initHelperMap();
-  }
+  if(id === 's-helper') document.getElementById('hbadge').style.display='none';
   go(id);
 }
 
@@ -1539,15 +998,16 @@ let lastTxSig = null;
 let solConnection = null;
 let HELPER_WALLET = '';
 
-const SOL_REWARD = 5;
+const SOL_REWARD = 2; // devnet faucet max per request
 
-function getSolConnection() {
-  if (!solConnection) {
-    solConnection = new solanaWeb3.Connection(
-      solanaWeb3.clusterApiUrl('devnet'), 'confirmed'
-    );
-  }
-  return solConnection;
+const DEVNET_RPCS = [
+  'https://api.devnet.solana.com',
+  'https://rpc.ankr.com/solana_devnet',
+];
+
+function getSolConnection(rpcIndex) {
+  const url = DEVNET_RPCS[(rpcIndex || 0) % DEVNET_RPCS.length];
+  return new solanaWeb3.Connection(url, 'confirmed');
 }
 
 function connectWallet() {
@@ -1555,11 +1015,12 @@ function connectWallet() {
   if (!input) { toast('Please paste your wallet address first'); return; }
   try { new solanaWeb3.PublicKey(input); } catch(e) { toast('Invalid wallet address — check and try again'); return; }
   HELPER_WALLET = input;
+  document.getElementById('sol-ratelimit-box').style.display = 'none';
   document.getElementById('sol-disconnected').style.display = 'none';
   document.getElementById('sol-connected').style.display = 'block';
   document.getElementById('sol-addr').textContent = input.slice(0,4)+'...'+input.slice(-4);
   updateSolUI();
-  toast('Wallet connected! ✅ Earn 5 SOL for every emergency you resolve');
+  toast('Wallet connected!');
 }
 
 function updateSolUI() {
@@ -1575,9 +1036,8 @@ function updateSolUI() {
 }
 
 async function awardSolana() {
-  // Always update the counter regardless of wallet
   solResponses++;
-  solEarned = Math.round((solEarned + 5) * 100) / 100;
+  solEarned = Math.round((solEarned + SOL_REWARD * 2) * 100) / 100; // 2 airdrops × 2 SOL
   updateSolUI();
 
   const phone = document.querySelector('.phone');
@@ -1586,38 +1046,65 @@ async function awardSolana() {
   phone.appendChild(flash);
   setTimeout(() => flash.remove(), 900);
 
-  // Read wallet address fresh — might have been set since last call
   const walletAddr = HELPER_WALLET || document.getElementById('sol-wallet-input')?.value?.trim();
 
   if (!walletAddr) {
-    toast('🎉 +5 SOL earned! Connect your wallet in Profile to receive it', 3500);
+    toast('🎉 +5 SOL earned!', 3500);
     return;
   }
 
-  toast('⏳ Sending 5 SOL to your devnet wallet...', 3000);
-
-  try {
-    const conn = getSolConnection();
+  // Try a single airdrop on one RPC, return sig on success or throw
+  async function tryAirdrop(rpcIndex) {
+    const conn = getSolConnection(rpcIndex);
     const recipientKey = new solanaWeb3.PublicKey(walletAddr);
     const lamports = Math.floor(solanaWeb3.LAMPORTS_PER_SOL * SOL_REWARD);
     const sig = await conn.requestAirdrop(recipientKey, lamports);
     const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash();
     await conn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
-    lastTxSig = sig;
-    const txLink = document.getElementById('sol-last-tx');
-    const txAnchor = document.getElementById('sol-tx-link');
+    return { sig, conn };
+  }
+
+  // Try each RPC in turn for a single airdrop
+  async function airdropWithFallback(label) {
+    for (let i = 0; i < DEVNET_RPCS.length; i++) {
+      try {
+        console.log(`${label} — trying RPC ${i}: ${DEVNET_RPCS[i]}`);
+        return await tryAirdrop(i);
+      } catch(e) {
+        console.warn(`${label} RPC ${i} failed:`, e.message);
+        if (i === DEVNET_RPCS.length - 1) throw e; // all failed
+      }
+    }
+  }
+
+  const txLink = document.getElementById('sol-last-tx');
+  const txAnchor = document.getElementById('sol-tx-link');
+
+  try {
+    toast('⏳ Requesting devnet airdrop 1/2...', 3000);
+    const r1 = await airdropWithFallback('Drop 1');
+    console.log('✅ Airdrop 1:', r1.sig);
+
+    toast('⏳ Requesting devnet airdrop 2/2...', 3000);
+    await new Promise(r => setTimeout(r, 1500)); // brief pause between drops
+    const r2 = await airdropWithFallback('Drop 2');
+    console.log('✅ Airdrop 2:', r2.sig);
+
+    lastTxSig = r2.sig;
     txLink.style.display = 'block';
-    txAnchor.href = `https://explorer.solana.com/tx/${sig}?cluster=devnet`;
-    toast('✅ 5 SOL confirmed in your wallet! 🚀', 4000);
-    console.log('✅ Solana airdrop tx:', sig);
+    txAnchor.href = `https://explorer.solana.com/tx/${r2.sig}?cluster=devnet`;
+    toast('✅ 5 SOL sent! In Phantom: Settings → Developer Settings → Devnet 🚀', 5500);
+
   } catch(e) {
-    console.warn('Airdrop failed (demo):', e.message);
-    // Demo mode — show success regardless
-    const txLink = document.getElementById('sol-last-tx');
-    const txAnchor = document.getElementById('sol-tx-link');
+    console.warn('All airdrop RPCs failed:', e.message);
+    // Show the rate-limit box with faucet link
+    const rlBox = document.getElementById('sol-ratelimit-box');
+    const faucetBtn = document.getElementById('sol-faucet-btn');
+    if (rlBox) rlBox.style.display = 'block';
+    if (faucetBtn) faucetBtn.href = `https://faucet.solana.com/?address=${walletAddr}`;
     txLink.style.display = 'block';
     txAnchor.href = `https://explorer.solana.com/address/${walletAddr}?cluster=devnet`;
-    toast('✅ 5 SOL reward recorded! View on Solana Explorer 🚀', 4500);
+    toast('⏳ Rate-limited — tap "Claim SOL" in your profile to get it instantly', 5500);
   }
 }
 
@@ -1632,19 +1119,7 @@ const BOT_SOS = [
 let botSosTimer = null;
 let activeBotSos = null;
 
-function stopBotSosLoop() {
-  if (botSosTimer) {
-    clearTimeout(botSosTimer);
-    botSosTimer = null;
-  }
-}
-
 function startBotSosLoop() {
-  if (!A.isDemo) {
-    // no bot loop for normal account flows
-    stopBotSosLoop();
-    return;
-  }
   // Only fire if user is actually logged in and on the app
   if (cur === 's-splash' || cur === 's-c1' || cur === 's-c2' || cur === 's-c3') {
     botSosTimer = setTimeout(startBotSosLoop, 3000);
@@ -1654,11 +1129,6 @@ function startBotSosLoop() {
 }
 
 function fireNextBotSos() {
-  if (!A.isDemo) {
-    stopBotSosLoop();
-    return;
-  }
-
   // Only trigger when logged in and on helper screen
   const loggedIn = cur !== 's-splash' && cur !== 's-c1' && cur !== 's-c2' && cur !== 's-c3';
   if (!loggedIn || cur !== 's-helper') {
@@ -1852,90 +1322,22 @@ function addCustomChip() {
 
 async function finish() {
   const name = (document.getElementById('i-name').value||'').trim()||'Demo User';
-  const phone = (document.getElementById('i-phone').value||'').trim();
   A.name = name; A.loc = (document.getElementById('i-loc').value||'').trim()||'Rolla, MO';
   A.init = (()=>{ const p=name.trim().split(/\s+/); return p.length>=2?(p[0][0]+p[p.length-1][0]).toUpperCase():name.slice(0,2).toUpperCase(); })();
   A.color = selInit?.color||'#D42B20';
   const skills = [...document.querySelectorAll('#skillChips .chip.on')].map(c=>c.textContent.trim());
   const res    = [...document.querySelectorAll('#resChips .chip.on')].map(c=>c.textContent.trim());
-
-  await saveAccount({ name:A.name, phone, loc:A.loc, init:A.init, color:A.color, skills, resources:res });
-
-  toast('Account created and pending approval. You will be able to access when approved.');
-  A.isDemo = false;
-  go('s-pending');
-  document.getElementById('pending-phone').textContent = phone;
+  toast('Welcome to FirstNet, '+A.name.split(' ')[0]+'!');
   _applyProfile([...skills,...res]);
-  await updateConnectedInfo(phone);
-}
-
-
-async function saveAccount(account) {
-  try {
-    const resp = await fetch('/api/accounts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(account)
-    });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || 'Failed to save account');
-    console.log('Saved account to CSV:', data);
-    toast('Account saved locally ✅', 2500);
-    return data;
-  } catch (e) {
-    console.warn('Could not save account locally:', e);
-    toast('Could not save account locally. Is the server running?', 3500);
-    return null;
-  }
-}
-
-function demo() {
-  A.name='Demo User'; A.init='DU'; A.color='#D42B20'; A.loc='Rolla, MO';
-  A.isDemo = true;
-  _applyProfile(['CPR Certified','First Aid','AED']);
   go('s-home'); buildNearbyList(); setTimeout(initMap, 50);
   startBotSosLoop();
 }
 
-async function login() {
-  stopBotSosLoop();
-  const phone = (document.getElementById('login-phone')?.value || '').trim();
-  const nameInput = (document.getElementById('login-name')?.value || '').trim();
-  if (!nameInput) {
-    toast('Enter your name to log in');
-    return;
-  }
-  if (!phone) {
-    toast('Enter your phone number to log in');
-    return;
-  }
-  const account = await fetchAccountByPhone(phone);
-  if (!account) {
-    toast('No account found. Please create one.');
-    return;
-  }
-  // Verify name matches (case-insensitive)
-  if ((account.name || '').trim().toLowerCase() !== nameInput.toLowerCase()) {
-    toast('Name does not match our records.');
-    return;
-  }
-  if (!account.approved || String(account.approved).toLowerCase() !== 'true') {
-    toast('Account pending approval. We will notify you once approved.');
-    go('s-pending');
-    document.getElementById('pending-phone').textContent = phone;
-    return;
-  }
-
-  A.isDemo = false;
-  applyAccount(account);
-  saveSession(phone);
-  toast('Welcome back, '+ (A.name.split(' ')[0] || 'Friend') +'!');
-  await updateConnectedInfo(phone);
-  go('s-home');
-  buildNearbyList();
-  setTimeout(initMap, 50);
-  startRequesterLocationTracking();
-  startPendingSOSWatch();
+function demo() {
+  A.name='Demo User'; A.init='DU'; A.color='#D42B20'; A.loc='Rolla, MO';
+  _applyProfile(['CPR Certified','First Aid','AED']);
+  go('s-home'); buildNearbyList(); setTimeout(initMap, 50);
+  startBotSosLoop();
 }
 
 function _applyProfile(tags) {
@@ -1953,164 +1355,19 @@ function _applyProfile(tags) {
 }
 
 /* ════ NEARBY LIST ════ */
-async function buildNearbyList() {
+function buildNearbyList() {
   const el = document.getElementById('nearbyList');
-  if (A.isDemo) {
-    el.innerHTML = BOTS.map(b=>`
-      <div class="nearby-row">
-        <div class="nav-av" style="background:${b.color};color:#fff">${b.init}</div>
-        <div><div class="nrow-name">${b.name}</div><div class="nrow-skills">${b.skills}</div></div>
-        <div class="nrow-dist">${b.dist}</div>
-      </div>`).join('');
-    setT('liveHelperCount', BOTS.length + ' helpers within 0.5 mi (demo)');
-    return;
-  }
-
-  try {
-    const resp = await fetch('/api/accounts?approved=true');
-    const accounts = (await resp.json()) || [];
-    const others = accounts.filter(a => a.phone && a.phone !== (A.phone || '').trim());
-    if (!others.length) {
-      el.innerHTML = `<div style="text-align:center;color:var(--ink3);margin-top:12px">No approved helpers online yet. We'll notify once your account is approved.</div>`;
-      setT('liveHelperCount', '0 approved helpers nearby');
-      return;
-    }
-    el.innerHTML = others.map(a => {
-      const initials = a.init || (a.name.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase());
-      const skills = (a.skills || '').replace(/\|/g, ' · ');
-      return `
-      <div class="nearby-row">
-        <div class="nav-av" style="background:${a.color||'#1A7A4A'};color:#fff">${initials}</div>
-        <div><div class="nrow-name">${a.name}</div><div class="nrow-skills">${skills||'No skills listed'}</div></div>
-        <div class="nrow-dist">0.6 mi</div>
-      </div>`;
-    }).join('');
-    setT('liveHelperCount', others.length + ' approved helpers nearby');
-  } catch (err) {
-    console.warn('Could not load nearby approved helpers:', err);
-    el.innerHTML = `<div style="text-align:center;color:var(--ink3);margin-top:12px">Unable to load helpers right now.</div>`;
-    setT('liveHelperCount', '0 helpers');
-  }
+  el.innerHTML = BOTS.map(b=>`
+    <div class="nearby-row">
+      <div class="nav-av" style="background:${b.color};color:#fff">${b.init}</div>
+      <div><div class="nrow-name">${b.name}</div><div class="nrow-skills">${b.skills}</div></div>
+      <div class="nrow-dist">${b.dist}</div>
+    </div>`).join('');
+  setT('liveHelperCount', BOTS.length+' helpers within 0.5 mi');
 }
 
 /* ════ HOME MAP ════ */
 let leafMap=null, botMarkers=[], userMarker=null, routeLine=null;
-let sosMarker=null;
-let reverseGeoCache = {};
-let lastReverseGeocodeKey = null;
-
-function setSOSMarker(lat, lng) {
-  if (!leafMap) return;
-  const nLat = Number(lat), nLng = Number(lng);
-  if (isNaN(nLat) || isNaN(nLng)) return;
-  if (sosMarker) {
-    sosMarker.setLatLng([nLat, nLng]);
-  } else {
-    sosMarker = L.marker([nLat, nLng], { icon: makeIcon('SOS', '#D42B20', false), zIndexOffset: 900 })
-      .addTo(leafMap)
-      .bindTooltip('Helpee location',{permanent:true,direction:'top',offset:[0,-16],className:'fn-tip'});
-  }
-}
-
-function clearSOSMarker() {
-  if (sosMarker && leafMap) {
-    leafMap.removeLayer(sosMarker);
-    sosMarker = null;
-  }
-}
-
-async function reverseGeocode(lat, lng) {
-  const nLat = Number(lat), nLng = Number(lng);
-  if (isNaN(nLat) || isNaN(nLng)) return null;
-  const key = nLat.toFixed(5) + ',' + nLng.toFixed(5);
-  if (reverseGeoCache[key]) return reverseGeoCache[key];
-
-  try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(nLat)}&lon=${encodeURIComponent(nLng)}&zoom=18&addressdetails=0`;
-    const resp = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'FirstNet-Demo' } });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const displayName = data?.display_name || null;
-    if (displayName) reverseGeoCache[key] = displayName;
-    return displayName;
-  } catch (err) {
-    console.warn('Reverse geocode error:', err);
-    return null;
-  }
-}
-
-let helperMap=null, helperRequesterMarker=null, helperSelfMarker=null, helperRouteLine=null;
-
-function initHelperMap() {
-  const container = document.getElementById('hmap');
-  if (!container || helperMap) return;
-  helperMap = L.map('hmap',{center:[USER_LAT,USER_LNG],zoom:14,zoomControl:false,attributionControl:false,scrollWheelZoom:false,dragging:false});
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(helperMap);
-
-  helperSelfMarker = L.marker([USER_LAT,USER_LNG],{icon:makeIcon('YOU','#D42B20',true),zIndexOffset:1000})
-    .addTo(helperMap)
-    .bindTooltip('You',{permanent:true,direction:'top',offset:[0,-16],className:'fn-tip'});
-}
-
-function updateHelperMap(requesterLat, requesterLng) {
-  if (!helperMap) initHelperMap();
-  if (!helperMap) return;
-
-  const rLat = Number(requesterLat), rLng = Number(requesterLng);
-  if (isNaN(rLat) || isNaN(rLng)) return;
-
-  if (helperSelfMarker) helperSelfMarker.setLatLng([USER_LAT, USER_LNG]);
-
-  if (helperRequesterMarker) {
-    helperRequesterMarker.setLatLng([rLat, rLng]);
-  } else {
-    helperRequesterMarker = L.marker([rLat, rLng], {icon: makeIcon('SOS', '#D42B20', false), zIndexOffset:900})
-      .addTo(helperMap)
-      .bindTooltip('Helpee',{permanent:true,direction:'top',offset:[0,-16],className:'fn-tip'});
-  }
-
-  if (helperRouteLine) {
-    helperRouteLine.setLatLngs([[USER_LAT, USER_LNG], [rLat, rLng]]);
-  } else {
-    helperRouteLine = L.polyline([[USER_LAT, USER_LNG], [rLat, rLng]], {color:'#1A7A4A', weight:3, dashArray:'8 6', opacity:.85}).addTo(helperMap);
-  }
-
-  helperMap.fitBounds(L.latLngBounds([[USER_LAT, USER_LNG], [rLat, rLng]]).pad(0.3), {animate:true, duration:0.4});
-}
-
-function resetHelperMap() {
-  if (helperMap) {
-    if (helperRequesterMarker) {
-      helperMap.removeLayer(helperRequesterMarker);
-      helperRequesterMarker = null;
-    }
-    if (helperRouteLine) {
-      helperMap.removeLayer(helperRouteLine);
-      helperRouteLine = null;
-    }
-    if (helperSelfMarker) {
-      helperSelfMarker.setLatLng([USER_LAT, USER_LNG]);
-    }
-    helperMap.setView([USER_LAT, USER_LNG], 14, { animate: true });
-  }
-  clearSOSMarker();
-}
-
-function updateLatLngOnMaps(lat, lng) {
-  const nLat = Number(lat), nLng = Number(lng);
-  if (isNaN(nLat) || isNaN(nLng)) return;
-
-  if (userMarker) userMarker.setLatLng([nLat, nLng]);
-  if (leafMap) {
-    leafMap.setView([nLat, nLng], Math.max(leafMap.getZoom(), 13), { animate: true });
-    setSOSMarker(nLat, nLng);
-  }
-  if (userMarkerM) userMarkerM.setLatLng([nLat, nLng]);
-  if (routeLineM && helperLat != null && helperLng != null) {
-    routeLineM.setLatLngs([[helperLat, helperLng], [nLat, nLng]]);
-  }
-  updateHelperMap(nLat, nLng);
-}
 
 function makeIcon(init, color, isYou) {
   return L.divIcon({
@@ -2129,14 +1386,12 @@ function initMap() {
     .addTo(leafMap)
     .bindTooltip('You',{permanent:true,direction:'top',offset:[0,-16],className:'fn-tip'});
   botMarkers = [];
-  if (A.isDemo) {
-    BOTS.forEach(b=>{
-      const m = L.marker([b.lat,b.lng],{icon:makeIcon(b.init,b.color,false)})
-        .addTo(leafMap)
-        .bindPopup(`<b>${b.name}</b><br>${b.skills}<br><span style="color:#1A7A4A;font-weight:700">${b.dist}</span>`,{maxWidth:180});
-      botMarkers.push(m);
-    });
-  }
+  BOTS.forEach(b=>{
+    const m = L.marker([b.lat,b.lng],{icon:makeIcon(b.init,b.color,false)})
+      .addTo(leafMap)
+      .bindPopup(`<b>${b.name}</b><br>${b.skills}<br><span style="color:#1A7A4A;font-weight:700">${b.dist}</span>`,{maxWidth:180});
+    botMarkers.push(m);
+  });
   setTimeout(()=>leafMap.invalidateSize(),100);
 }
 
@@ -2145,46 +1400,30 @@ let matchedMap=null, helperMarkerM=null, userMarkerM=null, routeLineM=null;
 let helperLat, helperLng;
 let helperMoveInterval=null;
 
-function initMatchedMap(botIdx, helperOverride) {
-  const bot = helperOverride || (BOTS && BOTS[botIdx]) || {lat: USER_LAT + 0.002, lng: USER_LNG + 0.002};
+function initMatchedMap(botIdx) {
+  const bot = BOTS[botIdx];
   helperLat = bot.lat; helperLng = bot.lng;
   if(!matchedMap) {
     matchedMap = L.map('matchedMap',{center:[USER_LAT,USER_LNG],zoom:15,zoomControl:false,attributionControl:false,scrollWheelZoom:false,dragging:false});
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(matchedMap);
   }
-  const requesterLat = (typeof window.REQUESTER_LAT === 'number' && !isNaN(window.REQUESTER_LAT)) ? window.REQUESTER_LAT : USER_LAT;
-  const requesterLng = (typeof window.REQUESTER_LNG === 'number' && !isNaN(window.REQUESTER_LNG)) ? window.REQUESTER_LNG : USER_LNG;
-
   if(userMarkerM) matchedMap.removeLayer(userMarkerM);
-  userMarkerM = L.marker([requesterLat,requesterLng],{icon:makeIcon('YOU','#D42B20',true),zIndexOffset:1000}).addTo(matchedMap).bindTooltip('You',{permanent:true,direction:'top',offset:[0,-14],className:'fn-tip'});
+  userMarkerM = L.marker([USER_LAT,USER_LNG],{icon:makeIcon('YOU','#D42B20',true),zIndexOffset:1000}).addTo(matchedMap).bindTooltip('You',{permanent:true,direction:'top',offset:[0,-14],className:'fn-tip'});
   if(helperMarkerM) matchedMap.removeLayer(helperMarkerM);
   helperMarkerM = L.marker([helperLat,helperLng],{icon:makeIcon(bot.init,bot.color,false),zIndexOffset:800}).addTo(matchedMap).bindTooltip(bot.name,{permanent:true,direction:'top',offset:[0,-16],className:'fn-tip'});
   if(routeLineM) matchedMap.removeLayer(routeLineM);
-  routeLineM = L.polyline([[helperLat,helperLng],[requesterLat,requesterLng]],{color:'#1A7A4A',weight:3,dashArray:'8 6',opacity:.85}).addTo(matchedMap);
+  routeLineM = L.polyline([[helperLat,helperLng],[USER_LAT,USER_LNG]],{color:'#1A7A4A',weight:3,dashArray:'8 6',opacity:.85}).addTo(matchedMap);
   matchedMap.fitBounds(L.latLngBounds([[helperLat,helperLng],[USER_LAT,USER_LNG]]).pad(0.4),{animate:true,duration:0.6});
   setTimeout(()=>matchedMap.invalidateSize(),150);
   startHelperMovement(botIdx);
 }
 
-async function updateServerHelperLocation(lat, lng) {
-  if (A.isDemo || !A.sosId) return;
-  try {
-    await fetch(`/api/sos/${encodeURIComponent(A.sosId)}/update-location`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ helperLat: lat, helperLng: lng })
-    });
-  } catch (e) {
-    debugLog('[FirstNet] updateServerHelperLocation error: ' + e);
-  }
-}
-
-function startHelperMovement(botIdx, helperOverride) {
+function startHelperMovement(botIdx) {
   if(helperMoveInterval) clearInterval(helperMoveInterval);
-  const bot = helperOverride || (BOTS && BOTS[botIdx]) || {lat: USER_LAT + 0.002, lng: USER_LNG + 0.002};
+  const bot = BOTS[botIdx];
   let step=0, totalSteps=60;
   const dLat=(USER_LAT-bot.lat)/totalSteps, dLng=(USER_LNG-bot.lng)/totalSteps;
-  helperMoveInterval = setInterval(async ()=>{
+  helperMoveInterval = setInterval(()=>{
     step++;
     if(step>=totalSteps){ clearInterval(helperMoveInterval); return; }
     helperLat += dLat+(Math.random()-.5)*0.0001;
@@ -2194,7 +1433,6 @@ function startHelperMovement(botIdx, helperOverride) {
     const dist=calcDist(helperLat,helperLng,USER_LAT,USER_LNG);
     setT('trackerDist', dist<0.05?'Arriving...':dist.toFixed(2)+' mi away');
     if(step%10===0&&matchedMap) matchedMap.fitBounds(L.latLngBounds([[helperLat,helperLng],[USER_LAT,USER_LNG]]).pad(0.4),{animate:true,duration:.5});
-    await updateServerHelperLocation(helperLat, helperLng);
   },2000);
 }
 
@@ -2325,7 +1563,7 @@ function renderTriage(sev, guidance, helperTip, headline) {
 
 let sendTimers=[], timeout911Timer=null, critical911Timer=null;
 
-async function sendSOS() {
+function sendSOS() {
   if(!A.em){ toast('Please select an emergency type first'); return; }
   if(A.em === 'Other' && !document.getElementById('hdesc').value.trim()){
     toast('Please describe your situation so we can match the right helper');
@@ -2344,77 +1582,37 @@ async function sendSOS() {
 
   const t2 = null; // placeholder kept for index consistency
 
-  const t3=setTimeout(async ()=>{
+  const t3=setTimeout(()=>{
     const desc=document.getElementById('hdesc').value.trim();
     A.sosId='local-'+Date.now();
     A._pendingDesc = desc;
     const triageFallback = TRIAGE[A.em]||TRIAGE['Other'];
     const triageSrc = A._aiTriage || triageFallback;
     A._pendingTriage = { sev: triageSrc.sev, r: triageSrc.r, h: triageSrc.h };
+    // For "Other", the effective em type for helper card uses detected type
     A._effectiveEmType = (A.em === 'Other' && A.detectedEmType) ? A.detectedEmType : A.em;
-
-    if (A.isDemo) {
-      A._matchedBot = pickBestBot(A.em);
-      _triggerHelper(A._effectiveEmType, desc, A._pendingTriage);
-      const isCritical = A._pendingTriage.sev === 'critical';
-      if(isCritical) {
-        critical911Timer = setTimeout(()=>{
-          show911Banner('Critical emergency', 'Call 911 now — neighbor also notified');
-        }, 4000);
-      }
-      const botAcceptTimer = setTimeout(()=>{
-        if(cur==='s-send') {
-          if(timeout911Timer){ clearTimeout(timeout911Timer); timeout911Timer=null; }
-          _showMatched(A._matchedBot||BOTS[0], A._pendingTriage, A._pendingDesc, A._botIdx||0, null);
-        }
-      }, 1800);
-      sendTimers.push(botAcceptTimer);
-    } else {
-      const sosPayload = {
-        requesterPhone: A.phone,
-        requesterName: A.name,
-        requesterInit: A.init,
-        requesterColor: A.color,
-        requesterLat: typeof REQUESTER_LAT === 'number' ? REQUESTER_LAT : (typeof USER_LAT === 'number' ? USER_LAT : null),
-        requesterLng: typeof REQUESTER_LNG === 'number' ? REQUESTER_LNG : (typeof USER_LNG === 'number' ? USER_LNG : null),
-        em: A._effectiveEmType,
-        desc,
-        triage: A._pendingTriage,
-      };
-      const createdSOS = await createServerSOS(sosPayload);
-      if (!createdSOS) {
-        toast('Unable to send SOS to server. Please check your connection and try again.');
-        go('s-home');
-        return;
-      }
-      A.sosId = createdSOS.id;
-      setPendingSOS(createdSOS);
-      debugLog('[FirstNet] sendSOS saved server sos and local copy: ' + JSON.stringify(createdSOS));
-      startPendingSOSWatch();
-      _triggerHelper(A._effectiveEmType, desc, A._pendingTriage); // keep helper card in requester's side for local feedback
+    A._matchedBot = pickBestBot(A.em);
+    _triggerHelper(A._effectiveEmType, desc, A._pendingTriage);
+    const isCritical = A._pendingTriage.sev === 'critical';
+    if(isCritical) {
+      critical911Timer = setTimeout(()=>{
+        show911Banner('Critical emergency', 'Call 911 now — neighbor also notified');
+      }, 4000);
     }
-
-    if (!A.isDemo) {
-      fetchAllAccounts().then(accounts => {
-        const helpers = accounts.filter(a => a.approved && String(a.approved).toLowerCase() === 'true' && a.phone !== (A.phone || '').trim());
-        setT('hcount', helpers.length);
-      });
-    }
-
+    const botAcceptTimer = setTimeout(()=>{
+      if(cur==='s-send') {
+        if(timeout911Timer){ clearTimeout(timeout911Timer); timeout911Timer=null; }
+        _showMatched(A._matchedBot||BOTS[0], A._pendingTriage, A._pendingDesc, A._botIdx||0);
+      }
+    }, 1800);
+    sendTimers.push(botAcceptTimer);
   },3500);
 
   sendTimers.push(t1,t3);
-  timeout911Timer=setTimeout(async ()=>{
+  timeout911Timer=setTimeout(()=>{
     if(cur==='s-send') {
-      const sos = getPendingSOS();
-      if (sos && sos.status === 'pending') {
-        if (!A.isDemo && sos.id) {
-          await timeoutServerSOS(sos.id);
-        }
-        sos.status = 'timeout';
-        setPendingSOS(sos);
-      }
-      toast('No helper accepted yet; 911 escalation is disabled in dev mode.',4200);
+      const isCrit = A._pendingTriage?.sev === 'critical';
+      if(!isCrit) show911Banner('No neighbor picked up','30s — call 911 now');
     }
   },30000);
 }
@@ -2436,42 +1634,23 @@ function showSendPhase(n) {
   });
 }
 function show911Banner(title, sub) {
-  // Temporarily disabled for live tests; keep UI for debugging only.
-  console.warn('911 banner suppressed:', title, sub);
-  // Optional visual hint: could show a non-urgent message via toast instead.
-  toast('911 auto-alert disabled for testing (' + (title || '') + ')', 3200);
+  if(title) setT('banner911-title', title);
+  if(sub) setT('banner911-sub', sub);
+  document.getElementById('banner911').style.display='flex';
 }
 function dismissBanner() { document.getElementById('banner911').style.display='none'; }
 
-function _showMatched(bot,triage,desc,botIdx,sos) {
+function _showMatched(bot,triage,desc,botIdx) {
   const t=triage||{r:'Stay calm.',h:'Assess on arrival.',sev:'high'};
   setT('mname',bot.name); setT('mmeta',bot.skills);
   const mav=document.getElementById('mav');
   mav.textContent=bot.init; mav.style.background=bot.color;
   setT('rguide',t.r||'Stay calm.');
-
-  const routeHelper = {
-    ...bot,
-    lat: sos && Number(sos.helperLat) ? Number(sos.helperLat) : (bot.lat || (USER_LAT + 0.002)),
-    lng: sos && Number(sos.helperLng) ? Number(sos.helperLng) : (bot.lng || (USER_LNG + 0.002)),
-    eta: (sos && sos.eta) || (bot.eta || 2)
-  };
-
-  window.REQUESTER_LAT = sos && Number(sos.requesterLat) ? Number(sos.requesterLat) : USER_LAT;
-  window.REQUESTER_LNG = sos && Number(sos.requesterLng) ? Number(sos.requesterLng) : USER_LNG;
-
-  const dist = calcDist(window.REQUESTER_LAT, window.REQUESTER_LNG, routeHelper.lat, routeHelper.lng);
-  const eta = Math.max(1, Math.ceil(dist * 2)); // assume 30 mph, dist in miles, time in minutes
-  setT('etadisp', eta + ':00');
-  setT('ambetadisp', (eta + 6) + ':00');
-  startEta(eta * 60);
-
+  startEta((bot.eta||2)*60);
   document.getElementById('chatR').innerHTML='<div class="typing-indicator" id="typingR"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
   go('s-matched');
   document.getElementById('hbadge').style.display='flex';
-
-  A._matchedBot = { ...bot, eta: routeHelper.eta };
-  setTimeout(()=>initMatchedMap(botIdx, routeHelper),200);
+  setTimeout(()=>initMatchedMap(botIdx),200);
   // Use effective em type (detected type for "Other") for chat persona
   const chatEmType = A._effectiveEmType || A.em || 'Medical Emergency';
   _scheduleAIChat(chatEmType, bot, desc);
@@ -2491,17 +1670,12 @@ const BOT_OPENERS = {
 };
 
 function _scheduleAIChat(emType, bot, desc) {
-  if (!A.isDemo) {
-    // In non-demo mode, do not generate pseudo-automated chatbot responses.
-    // Real helpers and requesters can send their own messages manually.
-    return;
-  }
-
   chatTimers.forEach(clearTimeout); chatTimers=[];
   botChatHistory = [];
   // For "Other" with a detected type, try to use its opener or fall back gracefully
   let openerKey = emType;
   if(!BOT_OPENERS[openerKey]) {
+    // Try partial match e.g. "Fall / Injury" → "Medical Emergency"
     if(/fall|injur|broken|fracture/i.test(openerKey)) openerKey = 'Medical Emergency';
     else if(/fire|smoke/i.test(openerKey)) openerKey = 'Medical Emergency';
     else if(/lock|key/i.test(openerKey)) openerKey = 'Locked Out';
@@ -2546,91 +1720,43 @@ function _triggerHelper(emType,desc,triage) {
 
 /* ════ ETA ════ */
 function startEta(secs) {
-  A.etaS=secs; A.ambEtaS=secs+360; if(A.etaT) clearInterval(A.etaT);
+  A.etaS=secs; if(A.etaT) clearInterval(A.etaT);
   A.etaT=setInterval(()=>{
-    if(A.etaS<=0 && A.ambEtaS<=0){ clearInterval(A.etaT); return; }
-    if(A.etaS>0){
-      A.etaS--;
-      const m=Math.floor(A.etaS/60),s=String(A.etaS%60).padStart(2,'0');
-      setT('etadisp',m+':'+s);
-    }
-    if(A.ambEtaS>0){
-      A.ambEtaS--;
-      const m=Math.floor(A.ambEtaS/60),s=String(A.ambEtaS%60).padStart(2,'0');
-      setT('ambetadisp',m+':'+s);
-    }
+    if(A.etaS<=0){ clearInterval(A.etaT); return; }
+    A.etaS--;
+    const m=Math.floor(A.etaS/60),s=String(A.etaS%60).padStart(2,'0');
+    setT('etadisp',m+':'+s);
+    if(A.etaS<=0) trigger911OnMatchedScreen();
   },1000);
 }
 function trigger911OnMatchedScreen() {
-  // Temporarily disable real 911 auto-notify during development/testing.
   addMsg911Tag('chatR');
-  toast('911 Auto-notify disabled in test mode (manual update soon)',3500);
+  toast('911 has been auto-notified as backup',3500);
 }
 
 /* ════ HELPER ACTIONS ════ */
-async function accept() {
-  let updatedSOS = null;
-  if (!A.isDemo) {
-    const sos = getPendingSOS();
-    if (sos && sos.status === 'pending' && sos.id) {
-      updatedSOS = await acceptServerSOS(sos.id, {
-        phone: A.phone,
-        name: A.name,
-        init: A.init,
-        color: A.color,
-        skills: (A.skills || []).slice(),
-      });
-      if (updatedSOS) {
-        setPendingSOS(updatedSOS);
-        A.sosId = updatedSOS.id;
-      } else {
-        toast('Could not accept SOS on server; please retry.');
-      }
-    }
-  }
-
+function accept() {
   document.getElementById('hinc').style.display='none';
   document.getElementById('hacc').style.display='flex';
   document.getElementById('hacc').style.flexDirection='column';
   setT('hguide',document.getElementById('iguide').textContent);
   document.getElementById('chatH').innerHTML='<div class="typing-indicator" id="typingH"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
-  botChatHistory = [];
-
-  if (!A.isDemo && updatedSOS && updatedSOS.requesterName) {
-    // Keep helper chat seeded while staying in helper UI.
-    const personName = updatedSOS.requesterName;
-    addMsg('chatH', 'On my way now, please share any extra details.', 'me');
-    addMsg('chatR', 'Helper ' + A.name + ' is on the way.', 'them', personName);
-  }
-
-  if (A.isDemo) {
-    const personName = activeBotSos ? activeBotSos.name : 'Person in need';
-    const firstMsg = "I'm on my way, should be there in about 2 minutes. Can you describe what's happening?";
-    showTypingIndicator('typingH',true);
-    setTimeout(()=>{
-      showTypingIndicator('typingH',false);
-      addMsg('chatH', firstMsg, 'them', personName);
-      botChatHistory.push({role:'assistant', content: firstMsg});
-    },1800);
-  }
-
+  botChatHistory = []; // fresh history for this emergency
+  const personName = activeBotSos ? activeBotSos.name : 'Person in need';
+  const firstMsg = "I'm on my way, should be there in about 2 minutes. Can you describe what's happening?";
+  showTypingIndicator('typingH',true);
+  setTimeout(()=>{
+    showTypingIndicator('typingH',false);
+    // This is Adel's opening message — show as 'me' on helper side, 'them' on requester side
+    addMsg('chatH', firstMsg, 'me');
+    addMsg('chatR', firstMsg, 'them', A.name || 'Responder');
+    botChatHistory.push({role:'assistant', content: firstMsg});
+  },1800);
   if(timeout911Timer) { clearTimeout(timeout911Timer); timeout911Timer=null; }
 }
-async function decline() {
-  if (!A.isDemo) {
-    const sos = getPendingSOS();
-    if (sos && sos.status === 'pending' && sos.id) {
-      const updated = await declineServerSOS(sos.id, A.phone);
-      if (!updated) {
-        toast('Could not decline SOS on server; please retry.');
-        return;
-      }
-      setPendingSOS(updated);
-    }
-  }
+function decline() {
   document.getElementById('hinc').style.display='none';
   document.getElementById('hidl').style.display='flex';
-  document.getElementById('hacc').style.display='none';
   toast('Declined. Notifying next helper...');
 }
 function togAvail() {
@@ -2648,35 +1774,27 @@ async function sendChat(role) {
   const msg=inp.value.trim(); if(!msg) return;
   addMsg(chatId,msg,'me');
   const other=role==='req'?'chatH':'chatR';
-
-  const helperName = (A._matchedBot||BOTS[0]).name || 'Helper';
-  const sender = role==='req' ? 'me' : 'them';
-  const receiver = role==='req' ? 'them' : 'me';
-  setTimeout(()=>addMsg(other,msg,receiver,helperName),300);
-
-  inp.value='';
-
-  if (A.isDemo) {
-    botChatHistory.push({role:'user',content:msg});
-    showTypingIndicator(typingId,true);
-    const chatEmType = (activeBotSos && activeBotSos.em) || A._effectiveEmType || A.em || 'Medical Emergency';
-    const chatDesc = (activeBotSos && activeBotSos.desc) || '';
-    const reply = await groqBotReply(chatEmType, chatDesc, helperName, role, botChatHistory.slice(-8), msg);
-    showTypingIndicator(typingId,false);
-    botChatHistory.push({role:'assistant',content:reply});
-    if(role==='req'){ addMsg('chatR',reply,'them',helperName); addMsg('chatH',reply,'me'); }
-    else { addMsg('chatH',reply,'them',helperName); addMsg('chatR',reply,'me'); }
+  const helperName = A.name || 'Responder';
+  const botName=(A._matchedBot||BOTS[0]).name;
+  // Mirror to the other chat pane with correct perspective
+  if(role==='req'){
+    // Requester typed — show as 'me' in chatR (already done), mirror as 'them' in chatH with bot name label
+    setTimeout(()=>addMsg('chatH', msg, 'them', botName), 300);
   } else {
-    // Non-demo: post chat to server and re-render shared thread
-    if (!A.sosId) return;
-    const updatedSOS = await postSOSChat(A.sosId, role === 'req' ? 'requester' : 'helper', msg);
-    if (updatedSOS) {
-      setPendingSOS(updatedSOS);
-    }
-    await syncServerSOSToLocal();
-    await refreshSOSChat();
-    showTypingIndicator(typingId,false);
+    // Helper (Adel) typed — show as 'me' in chatH (already done), mirror as 'them' in chatR with Adel's name
+    setTimeout(()=>addMsg('chatR', msg, 'them', helperName), 300);
   }
+  inp.value='';
+  botChatHistory.push({role:'user',content:msg});
+  showTypingIndicator(typingId,true);
+  // Use bot SOS context if available, otherwise fall back to A state
+  const chatEmType = (activeBotSos && activeBotSos.em) || A._effectiveEmType || A.em || 'Medical Emergency';
+  const chatDesc = (activeBotSos && activeBotSos.desc) || '';
+  const reply = await groqBotReply(chatEmType, chatDesc, botName, role, botChatHistory.slice(-8), msg);
+  showTypingIndicator(typingId,false);
+  botChatHistory.push({role:'assistant',content:reply});
+  if(role==='req'){ addMsg('chatR',reply,'them',botName); addMsg('chatH',reply,'me'); }
+  else { addMsg('chatH',reply,'them',botName); addMsg('chatR',reply,'me'); }
 }
 
 function addMsg(chatId,text,side,from) {
@@ -2687,53 +1805,6 @@ function addMsg(chatId,text,side,from) {
   const typing=el.querySelector('.typing-indicator');
   if(typing) el.insertBefore(d,typing); else el.appendChild(d);
   el.scrollTop=el.scrollHeight;
-}
-
-async function postSOSChat(sosId, sender, text) {
-  try {
-    const resp = await fetch(`/api/sos/${encodeURIComponent(sosId)}/chat`, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ sender, text })
-    });
-    if (!resp.ok) {
-      throw new Error('Failed to post chat');
-    }
-    const data = await resp.json();
-    if (data && data.sos) {
-      setPendingSOS(data.sos);
-      return data.sos;
-    }
-    return null;
-  } catch (e) {
-    debugLog('[FirstNet] postSOSChat error: ' + e);
-    return null;
-  }
-}
-
-async function refreshSOSChat() {
-  const sos = getPendingSOS();
-  if (!sos || !sos.chat) return;
-  const reqProfile = sos.requesterName || 'Requester';
-  const helperProfile = sos.acceptedBy ? sos.acceptedBy.name || 'Helper' : 'Helper';
-
-  const chatR = document.getElementById('chatR');
-  const chatH = document.getElementById('chatH');
-  if (!chatR || !chatH) return;
-
-  // clear except typing indicator
-  chatR.innerHTML = '<div class="typing-indicator" id="typingR"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
-  chatH.innerHTML = '<div class="typing-indicator" id="typingH"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
-
-  sos.chat.forEach(entry => {
-    if (entry.sender === 'requester') {
-      addMsg('chatR', entry.text, 'me');
-      addMsg('chatH', entry.text, 'them', reqProfile);
-    } else {
-      addMsg('chatH', entry.text, 'me');
-      addMsg('chatR', entry.text, 'them', helperProfile);
-    }
-  });
 }
 
 function addMsg911Tag(chatId) {
@@ -2747,37 +1818,24 @@ function addMsg911Tag(chatId) {
 }
 
 /* ════ RESOLVE ════ */
-async function resolve() {
-  // If not demo, tell the server SOS is resolved/cleared so helpers and requester stop seeing it.
-  if (!A.isDemo) {
-    const sos = getPendingSOS();
-    if (sos && sos.id) {
-      const cleared = await clearServerSOS(sos.id);
-      if (!cleared) {
-        debugLog('[FirstNet] resolve: failed to clear server SOS ' + sos.id);
-      }
-    }
-    setPendingSOS(null);
-  }
-
-  //awardSolana(); // 🏆 reward helper with SOL
+function resolveAsRequester() {
+  // Requester confirmed help arrived — no SOL reward (they were helped, not the helper)
+  resolve(false);
+}
+function resolve(awardHelper = true) {
+  if (awardHelper) awardSolana(); // 🏆 reward helper with SOL
   if(A.etaT) clearInterval(A.etaT);
   if(helperMoveInterval) clearInterval(helperMoveInterval);
   chatTimers.forEach(clearTimeout); chatTimers=[];
   if(timeout911Timer) clearTimeout(timeout911Timer);
   toast('Emergency resolved. Well done. 🏅');
   dismissBanner();
-  // Demo only: queue next bot SOS in 12 seconds
-  if (A.isDemo) {
-    if (botSosTimer) clearTimeout(botSosTimer);
-    botSosTimer = setTimeout(fireNextBotSos, 12000);
-  } else {
-    stopBotSosLoop();
-  }
+  // Queue next bot SOS in 12 seconds
+  if (botSosTimer) clearTimeout(botSosTimer);
+  botSosTimer = setTimeout(fireNextBotSos, 12000);
   document.getElementById('hidl').style.display='flex';
   document.getElementById('hinc').style.display='none';
   document.getElementById('hacc').style.display='none';
-  resetHelperMap();
   setTimeout(()=>{
     go('s-home');
     document.querySelectorAll('.em-card').forEach(c=>c.classList.remove('sel'));
@@ -2809,35 +1867,9 @@ function toast(msg,d=2600){
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove('show'),d);
 }
 
-function ensureNotificationPermission() {
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'default') {
-    Notification.requestPermission().then(permission => {
-      console.log('Notification permission:', permission);
-    });
-  }
-}
-
-function showAppNotification(title, body) {
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'granted') {
-    new Notification(title, { body: body || '', icon: '/img/notification-icon.png' });
-  } else if (Notification.permission === 'default') {
-    Notification.requestPermission().then(permission => {
-      if (permission === 'granted') {
-        new Notification(title, { body: body || '', icon: '/img/notification-icon.png' });
-      }
-    });
-  }
-}
-
 /* ════ INIT ════ */
-window.addEventListener('load', async ()=>{
-  ensureNotificationPermission();
-  const restored = await restoreSession();
-  if (!restored) {
-    buildNearbyList();
-  }
+window.addEventListener('load',()=>{
+  buildNearbyList();
 });
 </script>
 </body>
