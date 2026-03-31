@@ -104,7 +104,7 @@ No backend. No build step. No dependencies to install.
 
 ```bash
 # Just open it
-open http://localhost:3001
+open http://localhost:3001 → Optional Port (Changeable)
 ```
 
 Or serve it locally:
