@@ -104,7 +104,7 @@ No backend. No build step. No dependencies to install.
 
 ```bash
 # Just open it
-open index.html
+open [localhost:3001](http://localhost:3001)
 ```
 
 Or serve it locally:
