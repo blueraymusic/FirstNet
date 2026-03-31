@@ -110,8 +110,10 @@ open index.html
 Or serve it locally:
 
 ```bash
+cd Responder
 npx serve .
-# → http://localhost:3000
+# npm start  → if npx does not pass
+# → http://localhost:3001
 ```
 
 ---
